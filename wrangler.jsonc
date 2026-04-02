@@ -1,21 +1,23 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "techno-perspektyva-cloudflare-worker",
-  "main": "index.js",
-  "compatibility_date": "2026-04-02",
-  "workers_dev": true,
+  "name": "bot-for-my-friend-state",
+  "main": "src/index.js",
+  "compatibility_date": "2026-03-30",
   "kv_namespaces": [
     {
       "binding": "STATE_KV",
-      "id": "PUT_YOUR_KV_NAMESPACE_ID_HERE"
+      "id": "ef8328351f11434080c9f3b791b90107"
     }
   ],
   "vars": {
-    "ADMIN_IDS": "123456789,987654321",
+    "GOOGLE_SHEET_ID": "1MxWpPUMnVlgWdHN8AJAnfHmFGXcVhXVX0Yrty06Cf2k",
+    "ADMIN_IDS": "960724157,375938798",
     "WORKSHEET_NAME": "Applications",
     "TIMEZONE": "Europe/Kyiv",
-    "SETUP_KEY": "change-me",
-    "TELEGRAM_WEBHOOK_SECRET": "change-me",
-    "GOOGLE_SHEET_ID": "put_google_sheet_id_here"
+    "SETUP_KEY": "techno-perspektyva-setup-2026",
+    "TELEGRAM_WEBHOOK_SECRET": "techno-perspektyva-webhook-2026"
+  },
+  "observability": {
+    "enabled": true
   }
 }
