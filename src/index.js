@@ -1,9 +1,13 @@
 const DEFAULT_WORKSHEET_NAME = "Applications";
+const DEFAULT_LOGS_WORKSHEET_NAME = "BotLogs";
 const DEFAULT_TIMEZONE = "Europe/Kyiv";
 const SKIP_VALUE = "Не вказано";
 const STATUS_NEW = "Нова";
+const STATUS_CALLBACK = "Передзвонити";
 const STATUS_IN_PROGRESS = "В роботі";
 const STATUS_DONE = "Виконана";
+const STATUS_CANCELLED = "Скасована";
+const MAX_DESCRIPTION_LENGTH = 1000;
 
 const FORM_STEPS = {
   WAITING_NAME: "waiting_name",
@@ -11,7 +15,8 @@ const FORM_STEPS = {
   WAITING_EMAIL: "waiting_email",
   WAITING_ADDRESS: "waiting_address",
   WAITING_DESCRIPTION: "waiting_description",
-  WAITING_CALL_TIME: "waiting_call_time"
+  WAITING_CALL_TIME: "waiting_call_time",
+  WAITING_CONFIRMATION: "waiting_confirmation"
 };
 
 const SHEET_HEADERS = [
@@ -29,26 +34,56 @@ const SHEET_HEADERS = [
   "status"
 ];
 
+const OPTIONAL_EXTRA_HEADERS = ["updated_at", "last_admin_action"];
+const LOG_HEADERS = ["created_at", "level", "scope", "message", "details"];
+
 const TEXT = {
-  START: "Вітаємо в боті <b>Асистент з виконання електромонтажних робіт </b>.\n\nОберіть дію нижче.",
+  START: "Вітаємо в боті <b>Асистент з виконання електромонтажних робіт</b>.\n\nОберіть дію нижче.",
   START_APPLICATION: "Починаємо оформлення заявки.\n\nВведіть, будь ласка, ваше ім'я.",
   ASK_PHONE: "Введіть номер телефону у форматі <b>380XXXXXXXXX</b>.",
   ASK_EMAIL: "Введіть email або натисніть <b>Пропустити</b>.",
   ASK_ADDRESS: "Вкажіть адресу або населений пункт, де потрібні роботи.",
   ASK_DESCRIPTION: "Коротко опишіть, які роботи потрібно виконати.",
   ASK_CALL_TIME: "Вкажіть зручний час для дзвінка або натисніть <b>Пропустити</b>.",
+  ASK_CONFIRM: "Перевірте заявку нижче.\n\nЯкщо все правильно — натисніть <b>Підтвердити заявку</b>.",
   INVALID_NAME: "Ім'я має містити щонайменше 2 символи. Спробуйте ще раз.",
   INVALID_PHONE: "Номер має бути строго у форматі <b>380XXXXXXXXX</b>. Спробуйте ще раз.",
   INVALID_EMAIL: "Email виглядає некоректно. Спробуйте ще раз або натисніть <b>Пропустити</b>.",
   INVALID_ADDRESS: "Будь ласка, вкажіть коректну адресу або населений пункт.",
   INVALID_DESCRIPTION: "Опис має містити щонайменше 5 символів.",
+  TOO_LONG_DESCRIPTION: "Опис занадто довгий. Скоротіть його до 1000 символів.",
   CANCEL: "Поточну дію скасовано.",
   SUCCESS: "Дякуємо. Вашу заявку збережено.\n\nМи зв'яжемося з вами найближчим часом.",
   NO_REQUESTS: "У вас поки немає заявок.",
   ADMIN_ONLY: "Ця дія доступна тільки адміністраторам.",
   STATUS_UPDATED: "Статус заявки оновлено.",
   UNKNOWN_ACTION: "Не вдалося обробити дію.",
-  FALLBACK: "Оберіть одну з доступних дій нижче."
+  FALLBACK: "Оберіть одну з доступних дій нижче.",
+  FLOOD_LIMIT: "Забагато запитів за короткий час. Спробуйте ще раз трохи пізніше.",
+  ACTIVE_FORM_EXISTS: "У вас уже є незавершена заявка. Або завершіть її, або натисніть /cancel.",
+  NOTHING_TO_CONFIRM: "Немає заявки для підтвердження.",
+  USER_NOTIFIED: "Клієнта повідомлено про зміну статусу.",
+  USER_NOTIFY_FAILED: "Статус змінено, але клієнту повідомлення не відправилося.",
+  TODAY_EMPTY: "Сьогодні нових заявок ще не було.",
+  NEW_EMPTY: "Немає заявок зі статусом 'Нова'.",
+  STATS_EMPTY: "Поки що недостатньо даних для статистики.",
+  EDIT_PROMPT: "Що хочете змінити у заявці?"
+};
+
+const CALLBACKS = {
+  STATUS_PREFIX: "status:",
+  EDIT_PREFIX: "edit:",
+  CONFIRM_SUBMIT: "confirm:submit",
+  CONFIRM_CANCEL: "confirm:cancel"
+};
+
+const EDIT_FIELDS = {
+  name: FORM_STEPS.WAITING_NAME,
+  phone: FORM_STEPS.WAITING_PHONE,
+  email: FORM_STEPS.WAITING_EMAIL,
+  address: FORM_STEPS.WAITING_ADDRESS,
+  description: FORM_STEPS.WAITING_DESCRIPTION,
+  call_time: FORM_STEPS.WAITING_CALL_TIME
 };
 
 export default {
@@ -57,7 +92,7 @@ export default {
       const url = new URL(request.url);
 
       if (request.method === "GET" && url.pathname === "/") {
-        return jsonResponse({ ok: true, service: "bot-for-my-friend", status: "running" });
+        return jsonResponse({ ok: true, service: "techno-perspektyva-bot", status: "running" });
       }
 
       if (request.method === "GET" && url.pathname === "/setup") {
@@ -98,6 +133,9 @@ async function handleSetup(request, env) {
     commands: [
       { command: "start", description: "Почати роботу" },
       { command: "my_requests", description: "Мої заявки" },
+      { command: "new_requests", description: "Нові заявки (адмін)" },
+      { command: "today", description: "Заявки за сьогодні (адмін)" },
+      { command: "stats", description: "Статистика (адмін)" },
       { command: "cancel", description: "Скасувати поточну дію" }
     ]
   });
@@ -138,7 +176,7 @@ async function processUpdate(update, env) {
       await handleCallbackQuery(update.callback_query, env);
     }
   } catch (error) {
-    console.error("processUpdate error:", error instanceof Error ? error.message : String(error));
+    await logError(env, "processUpdate", error, { update });
   }
 }
 
@@ -159,6 +197,11 @@ async function handleMessage(message, env) {
 
   if (!chatId) return;
 
+  if (!(await checkRateLimit(env, chatId, message.from?.id))) {
+    await sendMessage(env, chatId, TEXT.FLOOD_LIMIT, { reply_markup: mainMenuKeyboard() });
+    return;
+  }
+
   if (text === "/start" || text === "Головне меню") {
     await clearState(env, chatId);
     await sendMessage(env, chatId, TEXT.START, { reply_markup: mainMenuKeyboard() });
@@ -177,7 +220,39 @@ async function handleMessage(message, env) {
     return;
   }
 
+  if (text === "/new_requests") {
+    if (!isAdmin(env, message.from?.id)) {
+      await sendMessage(env, chatId, TEXT.ADMIN_ONLY, { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+    await sendAdminRequestsByStatus(env, chatId, STATUS_NEW, TEXT.NEW_EMPTY);
+    return;
+  }
+
+  if (text === "/today") {
+    if (!isAdmin(env, message.from?.id)) {
+      await sendMessage(env, chatId, TEXT.ADMIN_ONLY, { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+    await sendTodayRequests(env, chatId);
+    return;
+  }
+
+  if (text === "/stats") {
+    if (!isAdmin(env, message.from?.id)) {
+      await sendMessage(env, chatId, TEXT.ADMIN_ONLY, { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+    await sendStats(env, chatId);
+    return;
+  }
+
   if (text === "Створити заявку") {
+    const state = await getState(env, chatId);
+    if (state && !state.isEditing) {
+      await sendMessage(env, chatId, TEXT.ACTIVE_FORM_EXISTS, { reply_markup: cancelKeyboard() });
+      return;
+    }
     await saveState(env, chatId, { step: FORM_STEPS.WAITING_NAME, data: {} });
     await sendMessage(env, chatId, TEXT.START_APPLICATION, { reply_markup: cancelKeyboard() });
     return;
@@ -205,7 +280,7 @@ async function processFormStep(message, state, env) {
         return;
       }
       data.name = text;
-      await saveState(env, chatId, { step: FORM_STEPS.WAITING_PHONE, data });
+      await saveState(env, chatId, { step: FORM_STEPS.WAITING_PHONE, data, isEditing: false });
       await sendMessage(env, chatId, TEXT.ASK_PHONE, { reply_markup: cancelKeyboard() });
       return;
 
@@ -216,7 +291,7 @@ async function processFormStep(message, state, env) {
         return;
       }
       data.phone = normalizedPhone;
-      await saveState(env, chatId, { step: FORM_STEPS.WAITING_EMAIL, data });
+      await saveState(env, chatId, { step: FORM_STEPS.WAITING_EMAIL, data, isEditing: false });
       await sendMessage(env, chatId, TEXT.ASK_EMAIL, { reply_markup: skipKeyboard() });
       return;
     }
@@ -231,7 +306,7 @@ async function processFormStep(message, state, env) {
         }
         data.email = text;
       }
-      await saveState(env, chatId, { step: FORM_STEPS.WAITING_ADDRESS, data });
+      await saveState(env, chatId, { step: FORM_STEPS.WAITING_ADDRESS, data, isEditing: false });
       await sendMessage(env, chatId, TEXT.ASK_ADDRESS, { reply_markup: cancelKeyboard() });
       return;
 
@@ -241,7 +316,7 @@ async function processFormStep(message, state, env) {
         return;
       }
       data.address = text;
-      await saveState(env, chatId, { step: FORM_STEPS.WAITING_DESCRIPTION, data });
+      await saveState(env, chatId, { step: FORM_STEPS.WAITING_DESCRIPTION, data, isEditing: false });
       await sendMessage(env, chatId, TEXT.ASK_DESCRIPTION, { reply_markup: cancelKeyboard() });
       return;
 
@@ -250,28 +325,25 @@ async function processFormStep(message, state, env) {
         await sendMessage(env, chatId, TEXT.INVALID_DESCRIPTION, { reply_markup: cancelKeyboard() });
         return;
       }
+      if (text.length > MAX_DESCRIPTION_LENGTH) {
+        await sendMessage(env, chatId, TEXT.TOO_LONG_DESCRIPTION, { reply_markup: cancelKeyboard() });
+        return;
+      }
       data.description = text;
-      await saveState(env, chatId, { step: FORM_STEPS.WAITING_CALL_TIME, data });
+      await saveState(env, chatId, { step: FORM_STEPS.WAITING_CALL_TIME, data, isEditing: false });
       await sendMessage(env, chatId, TEXT.ASK_CALL_TIME, { reply_markup: skipKeyboard() });
       return;
 
     case FORM_STEPS.WAITING_CALL_TIME:
       data.call_time = text === "Пропустити" || !text ? SKIP_VALUE : text;
-      const payload = buildApplicationPayload(message.from, data, env);
+      await saveState(env, chatId, { step: FORM_STEPS.WAITING_CONFIRMATION, data, isEditing: false });
+      await sendMessage(env, chatId, `${TEXT.ASK_CONFIRM}\n\n${formatClientPreview(data)}`, {
+        reply_markup: confirmKeyboard()
+      });
+      return;
 
-      const dedupeKey = `request-submit:${chatId}:${hashPayload(payload)}`;
-      const alreadySubmitted = await env.STATE_KV.get(dedupeKey);
-      if (alreadySubmitted === "1") {
-        await clearState(env, chatId);
-        await sendMessage(env, chatId, TEXT.SUCCESS, { reply_markup: afterSubmitKeyboard() });
-        return;
-      }
-
-      await env.STATE_KV.put(dedupeKey, "1", { expirationTtl: 60 * 10 });
-      await appendApplication(env, payload);
-      await notifyAdmins(env, payload);
-      await clearState(env, chatId);
-      await sendMessage(env, chatId, TEXT.SUCCESS, { reply_markup: afterSubmitKeyboard() });
+    case FORM_STEPS.WAITING_CONFIRMATION:
+      await sendMessage(env, chatId, TEXT.NOTHING_TO_CONFIRM, { reply_markup: confirmKeyboard() });
       return;
 
     default:
@@ -287,80 +359,183 @@ async function handleCallbackQuery(callbackQuery, env) {
 
   if (!message?.chat?.id) return;
 
-  if (!isAdmin(env, fromId)) {
-    await answerCallbackQuery(env, callbackQuery.id, TEXT.ADMIN_ONLY, true);
+  try {
+    if (data === CALLBACKS.CONFIRM_SUBMIT) {
+      await handleConfirmSubmit(callbackQuery, env);
+      return;
+    }
+
+    if (data === CALLBACKS.CONFIRM_CANCEL) {
+      await clearState(env, message.chat.id);
+      await answerCallbackQuery(env, callbackQuery.id, TEXT.CANCEL, false);
+      await sendMessage(env, message.chat.id, TEXT.CANCEL, { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    if (data.startsWith(CALLBACKS.EDIT_PREFIX)) {
+      await handleEditCallback(callbackQuery, env);
+      return;
+    }
+
+    if (!data.startsWith(CALLBACKS.STATUS_PREFIX)) {
+      await answerCallbackQuery(env, callbackQuery.id, TEXT.UNKNOWN_ACTION, true);
+      return;
+    }
+
+    if (!isAdmin(env, fromId)) {
+      await answerCallbackQuery(env, callbackQuery.id, TEXT.ADMIN_ONLY, true);
+      return;
+    }
+
+    const parts = data.split(":");
+    if (parts.length !== 3) {
+      await answerCallbackQuery(env, callbackQuery.id, TEXT.UNKNOWN_ACTION, true);
+      return;
+    }
+
+    const requestId = parts[1];
+    const statusCode = parts[2];
+    const statusValue = mapStatusCode(statusCode);
+
+    if (!statusValue) {
+      await answerCallbackQuery(env, callbackQuery.id, TEXT.UNKNOWN_ACTION, true);
+      return;
+    }
+
+    const updated = await updateApplicationStatus(env, requestId, statusValue, callbackQuery.from);
+    if (!updated?.ok) {
+      await answerCallbackQuery(env, callbackQuery.id, "Не вдалося змінити статус.", true);
+      return;
+    }
+
+    const currentText = message.text || message.caption || "";
+    const newText = replaceStatusInText(currentText, statusValue, updated.updatedAt, callbackQuery.from);
+
+    const payload = {
+      chat_id: message.chat.id,
+      message_id: message.message_id,
+      text: newText,
+      parse_mode: "HTML"
+    };
+
+    if (![STATUS_DONE, STATUS_CANCELLED].includes(statusValue)) {
+      payload.reply_markup = adminStatusKeyboard(requestId);
+    }
+
+    await telegramApi(env, "editMessageText", payload);
+
+    const notifyResult = await notifyClientAboutStatus(env, updated.row, statusValue);
+    await answerCallbackQuery(
+      env,
+      callbackQuery.id,
+      notifyResult ? `${TEXT.STATUS_UPDATED}. ${TEXT.USER_NOTIFIED}` : `${TEXT.STATUS_UPDATED}. ${TEXT.USER_NOTIFY_FAILED}`,
+      false
+    );
+  } catch (error) {
+    await logError(env, "handleCallbackQuery", error, { callbackQuery });
+    await answerCallbackQuery(env, callbackQuery.id, TEXT.UNKNOWN_ACTION, true);
+  }
+}
+
+async function handleConfirmSubmit(callbackQuery, env) {
+  const chatId = callbackQuery.message?.chat?.id;
+  if (!chatId) return;
+
+  const state = await getState(env, chatId);
+  if (!state || state.step !== FORM_STEPS.WAITING_CONFIRMATION) {
+    await answerCallbackQuery(env, callbackQuery.id, TEXT.NOTHING_TO_CONFIRM, true);
     return;
   }
 
-  if (!data.startsWith("status:")) {
+  const payload = buildApplicationPayload(callbackQuery.from, state.data || {}, env);
+  const dedupeKey = `request-submit:${chatId}:${hashPayload(payload)}`;
+  const alreadySubmitted = await env.STATE_KV.get(dedupeKey);
+
+  if (alreadySubmitted === "1") {
+    await clearState(env, chatId);
+    await answerCallbackQuery(env, callbackQuery.id, TEXT.SUCCESS, false);
+    await sendMessage(env, chatId, TEXT.SUCCESS, { reply_markup: afterSubmitKeyboard() });
+    return;
+  }
+
+  await env.STATE_KV.put(dedupeKey, "1", { expirationTtl: 60 * 10 });
+  await appendApplication(env, payload);
+  await notifyAdmins(env, payload);
+  await clearState(env, chatId);
+
+  await answerCallbackQuery(env, callbackQuery.id, "Заявку підтверджено.", false);
+  await sendMessage(env, chatId, TEXT.SUCCESS, { reply_markup: afterSubmitKeyboard() });
+}
+
+async function handleEditCallback(callbackQuery, env) {
+  const chatId = callbackQuery.message?.chat?.id;
+  const target = callbackQuery.data.split(":")[1];
+
+  if (!chatId || !EDIT_FIELDS[target]) {
     await answerCallbackQuery(env, callbackQuery.id, TEXT.UNKNOWN_ACTION, true);
     return;
   }
 
-  const parts = data.split(":");
-  if (parts.length !== 3) {
-    await answerCallbackQuery(env, callbackQuery.id, TEXT.UNKNOWN_ACTION, true);
+  const state = await getState(env, chatId);
+  if (!state || !state.data) {
+    await answerCallbackQuery(env, callbackQuery.id, TEXT.NOTHING_TO_CONFIRM, true);
     return;
   }
 
-  const requestId = parts[1];
-  const statusCode = parts[2];
+  const nextStep = EDIT_FIELDS[target];
+  await saveState(env, chatId, { step: nextStep, data: state.data, isEditing: true });
+  await answerCallbackQuery(env, callbackQuery.id, "Редагування відкрито.", false);
 
-  let statusValue = null;
-  if (statusCode === "in_progress") statusValue = STATUS_IN_PROGRESS;
-  if (statusCode === "done") statusValue = STATUS_DONE;
-
-  if (!statusValue) {
-    await answerCallbackQuery(env, callbackQuery.id, TEXT.UNKNOWN_ACTION, true);
-    return;
-  }
-
-  const updated = await updateApplicationStatus(env, requestId, statusValue);
-  if (!updated) {
-    await answerCallbackQuery(env, callbackQuery.id, "Не вдалося змінити статус.", true);
-    return;
-  }
-
-  const currentText = message.text || message.caption || "";
-  const newText = replaceStatusInText(currentText, statusValue);
-
-  const payload = {
-    chat_id: message.chat.id,
-    message_id: message.message_id,
-    text: newText,
-    parse_mode: "HTML"
+  const askMap = {
+    [FORM_STEPS.WAITING_NAME]: TEXT.START_APPLICATION,
+    [FORM_STEPS.WAITING_PHONE]: TEXT.ASK_PHONE,
+    [FORM_STEPS.WAITING_EMAIL]: TEXT.ASK_EMAIL,
+    [FORM_STEPS.WAITING_ADDRESS]: TEXT.ASK_ADDRESS,
+    [FORM_STEPS.WAITING_DESCRIPTION]: TEXT.ASK_DESCRIPTION,
+    [FORM_STEPS.WAITING_CALL_TIME]: TEXT.ASK_CALL_TIME
   };
 
-  if (statusValue !== STATUS_DONE) {
-    payload.reply_markup = adminStatusKeyboard(requestId);
-  }
+  const keyboardMap = {
+    [FORM_STEPS.WAITING_NAME]: cancelKeyboard(),
+    [FORM_STEPS.WAITING_PHONE]: cancelKeyboard(),
+    [FORM_STEPS.WAITING_EMAIL]: skipKeyboard(),
+    [FORM_STEPS.WAITING_ADDRESS]: cancelKeyboard(),
+    [FORM_STEPS.WAITING_DESCRIPTION]: cancelKeyboard(),
+    [FORM_STEPS.WAITING_CALL_TIME]: skipKeyboard()
+  };
 
-  await telegramApi(env, "editMessageText", payload);
-  await answerCallbackQuery(env, callbackQuery.id, TEXT.STATUS_UPDATED, false);
+  await sendMessage(env, chatId, `${TEXT.EDIT_PROMPT}\n\n${askMap[nextStep]}`, {
+    reply_markup: keyboardMap[nextStep]
+  });
+}
+
+function mapStatusCode(statusCode) {
+  if (statusCode === "callback") return STATUS_CALLBACK;
+  if (statusCode === "in_progress") return STATUS_IN_PROGRESS;
+  if (statusCode === "done") return STATUS_DONE;
+  if (statusCode === "cancelled") return STATUS_CANCELLED;
+  return null;
 }
 
 function buildApplicationPayload(user, formData, env) {
   const requestId = generateRequestId();
-  const timezone = env.TIMEZONE || DEFAULT_TIMEZONE;
-  const createdAt = new Intl.DateTimeFormat("uk-UA", {
-    timeZone: timezone,
-    dateStyle: "short",
-    timeStyle: "medium"
-  }).format(new Date());
+  const createdAt = formatDateTime(env, new Date());
 
   return {
     request_id: requestId,
     created_at: createdAt,
     source: "telegram",
     telegram_id: String(user?.id || ""),
-    username: user?.username ? `@${user.username}` : "",
+    username: user?.username ? `@${user.username}` : [user?.first_name, user?.last_name].filter(Boolean).join(" "),
     name: formData.name || "",
     phone: formData.phone || "",
     email: formData.email || SKIP_VALUE,
     address: formData.address || "",
     description: formData.description || "",
     call_time: formData.call_time || SKIP_VALUE,
-    status: STATUS_NEW
+    status: STATUS_NEW,
+    updated_at: createdAt,
+    last_admin_action: ""
   };
 }
 
@@ -374,8 +549,26 @@ async function notifyAdmins(env, payload) {
         reply_markup: adminStatusKeyboard(payload.request_id)
       });
     } catch (error) {
-      console.error("notifyAdmins error:", adminId, error instanceof Error ? error.message : String(error));
+      await logError(env, "notifyAdmins", error, { adminId, requestId: payload.request_id });
     }
+  }
+}
+
+async function notifyClientAboutStatus(env, row, statusValue) {
+  const chatId = Number(row?.telegram_id || 0);
+  if (!chatId) return false;
+
+  const text = [
+    `<b>Оновлення по заявці ${escapeHtml(row.request_id || "")}</b>`,
+    `📌 Новий статус: <b>${escapeHtml(statusValue)}</b>`
+  ].join("\n");
+
+  try {
+    await sendMessage(env, chatId, text, { reply_markup: afterSubmitKeyboard() });
+    return true;
+  } catch (error) {
+    await logError(env, "notifyClientAboutStatus", error, { chatId, requestId: row?.request_id, statusValue });
+    return false;
   }
 }
 
@@ -388,25 +581,82 @@ async function sendUserRequests(env, chatId) {
     return;
   }
 
-  const chunks = [];
-  for (const row of userRows) {
-    chunks.push([
-      `🆔 <b>${escapeHtml(row.request_id || "-")}</b>`,
-      `📅 ${escapeHtml(row.created_at || "-")}`,
-      `📞 ${escapeHtml(row.phone || "-")}`,
-      `📍 ${escapeHtml(row.address || "-")}`,
-      `📝 ${escapeHtml(row.description || "-")}`,
-      `📌 Статус: <b>${escapeHtml(row.status || "-")}</b>`
-    ].join("\n"));
-  }
+  const chunks = userRows
+    .sort(compareRowsByCreatedAtDesc)
+    .slice(0, 10)
+    .map(formatRequestSummary);
 
   await sendMessage(env, chatId, `<b>Ваші заявки:</b>\n\n${chunks.join("\n\n──────────\n\n")}`, {
     reply_markup: mainMenuKeyboard()
   });
 }
 
+async function sendAdminRequestsByStatus(env, chatId, status, emptyText) {
+  const rows = await getApplications(env);
+  const filtered = rows.filter((row) => String(row.status || "") === status).sort(compareRowsByCreatedAtDesc).slice(0, 10);
+
+  if (!filtered.length) {
+    await sendMessage(env, chatId, emptyText, { reply_markup: mainMenuKeyboard() });
+    return;
+  }
+
+  const text = `<b>Заявки зі статусом ${escapeHtml(status)}:</b>\n\n${filtered.map(formatRequestSummary).join("\n\n──────────\n\n")}`;
+  await sendMessage(env, chatId, text, { reply_markup: mainMenuKeyboard() });
+}
+
+async function sendTodayRequests(env, chatId) {
+  const rows = await getApplications(env);
+  const todayPrefix = formatDatePrefix(env, new Date());
+  const filtered = rows.filter((row) => String(row.created_at || "").startsWith(todayPrefix)).sort(compareRowsByCreatedAtDesc).slice(0, 10);
+
+  if (!filtered.length) {
+    await sendMessage(env, chatId, TEXT.TODAY_EMPTY, { reply_markup: mainMenuKeyboard() });
+    return;
+  }
+
+  const text = `<b>Заявки за сьогодні:</b>\n\n${filtered.map(formatRequestSummary).join("\n\n──────────\n\n")}`;
+  await sendMessage(env, chatId, text, { reply_markup: mainMenuKeyboard() });
+}
+
+async function sendStats(env, chatId) {
+  const rows = await getApplications(env);
+  if (!rows.length) {
+    await sendMessage(env, chatId, TEXT.STATS_EMPTY, { reply_markup: mainMenuKeyboard() });
+    return;
+  }
+
+  const counters = {
+    total: rows.length,
+    new: 0,
+    callback: 0,
+    inProgress: 0,
+    done: 0,
+    cancelled: 0
+  };
+
+  for (const row of rows) {
+    if (row.status === STATUS_NEW) counters.new += 1;
+    if (row.status === STATUS_CALLBACK) counters.callback += 1;
+    if (row.status === STATUS_IN_PROGRESS) counters.inProgress += 1;
+    if (row.status === STATUS_DONE) counters.done += 1;
+    if (row.status === STATUS_CANCELLED) counters.cancelled += 1;
+  }
+
+  const text = [
+    "<b>Статистика заявок</b>",
+    `Усього: <b>${counters.total}</b>`,
+    `Нова: <b>${counters.new}</b>`,
+    `Передзвонити: <b>${counters.callback}</b>`,
+    `В роботі: <b>${counters.inProgress}</b>`,
+    `Виконана: <b>${counters.done}</b>`,
+    `Скасована: <b>${counters.cancelled}</b>`
+  ].join("\n");
+
+  await sendMessage(env, chatId, text, { reply_markup: mainMenuKeyboard() });
+}
+
 function formatAdminMessage(payload) {
-  return [
+  const lines = [
     "<b>Нова заявка</b>",
     `🆔 <b>${escapeHtml(payload.request_id)}</b>`,
     `📅 <b>Створено:</b> ${escapeHtml(payload.created_at)}`,
@@ -419,24 +669,68 @@ function formatAdminMessage(payload) {
     `💬 <b>Telegram ID:</b> ${escapeHtml(payload.telegram_id)}`,
     `🔗 <b>Username:</b> ${escapeHtml(payload.username || "—")}`,
     `📌 <b>Статус:</b> ${escapeHtml(payload.status)}`
+  ];
+
+  if (payload.updated_at) {
+    lines.push(`🛠 <b>Оновлено:</b> ${escapeHtml(payload.updated_at)}`);
+  }
+
+  if (payload.last_admin_action) {
+    lines.push(`👨‍🔧 <b>Остання дія:</b> ${escapeHtml(payload.last_admin_action)}`);
+  }
+
+  return lines.join("\n");
+}
+
+function formatClientPreview(data) {
+  return [
+    `👤 <b>Ім'я:</b> ${escapeHtml(data.name || "—")}`,
+    `📞 <b>Телефон:</b> ${escapeHtml(data.phone || "—")}`,
+    `✉️ <b>Email:</b> ${escapeHtml(data.email || SKIP_VALUE)}`,
+    `📍 <b>Адреса:</b> ${escapeHtml(data.address || "—")}`,
+    `📝 <b>Опис:</b> ${escapeHtml(data.description || "—")}`,
+    `🕒 <b>Зручний час:</b> ${escapeHtml(data.call_time || SKIP_VALUE)}`
   ].join("\n");
 }
 
-function replaceStatusInText(text, newStatus) {
+function formatRequestSummary(row) {
+  return [
+    `🆔 <b>${escapeHtml(row.request_id || "-")}</b>`,
+    `📅 ${escapeHtml(row.created_at || "-")}`,
+    `👤 ${escapeHtml(row.name || "-")}`,
+    `📞 ${escapeHtml(row.phone || "-")}`,
+    `📍 ${escapeHtml(row.address || "-")}`,
+    `📝 ${escapeHtml(trimText(row.description || "-", 180))}`,
+    `📌 Статус: <b>${escapeHtml(row.status || "-")}</b>`
+  ].join("\n");
+}
+
+function replaceStatusInText(text, newStatus, updatedAt, adminUser) {
   const lines = text.split("\n");
-  let replaced = false;
+  let statusReplaced = false;
+  let updatedReplaced = false;
+  let adminReplaced = false;
+  const adminLabel = formatAdminLabel(adminUser);
 
   const updated = lines.map((line) => {
     if (line.startsWith("📌 <b>Статус:</b>")) {
-      replaced = true;
+      statusReplaced = true;
       return `📌 <b>Статус:</b> ${escapeHtml(newStatus)}`;
+    }
+    if (line.startsWith("🛠 <b>Оновлено:</b>")) {
+      updatedReplaced = true;
+      return `🛠 <b>Оновлено:</b> ${escapeHtml(updatedAt || "—")}`;
+    }
+    if (line.startsWith("👨‍🔧 <b>Остання дія:</b>")) {
+      adminReplaced = true;
+      return `👨‍🔧 <b>Остання дія:</b> ${escapeHtml(adminLabel)}`;
     }
     return line;
   });
 
-  if (!replaced) {
-    updated.push(`📌 <b>Статус:</b> ${escapeHtml(newStatus)}`);
-  }
+  if (!statusReplaced) updated.push(`📌 <b>Статус:</b> ${escapeHtml(newStatus)}`);
+  if (!updatedReplaced) updated.push(`🛠 <b>Оновлено:</b> ${escapeHtml(updatedAt || "—")}`);
+  if (!adminReplaced) updated.push(`👨‍🔧 <b>Остання дія:</b> ${escapeHtml(adminLabel)}`);
 
   return updated.join("\n");
 }
@@ -465,10 +759,37 @@ function afterSubmitKeyboard() {
 
 function adminStatusKeyboard(requestId) {
   return {
-    inline_keyboard: [[
-      { text: "✅ В роботу", callback_data: `status:${requestId}:in_progress` },
-      { text: "🏁 Виконана", callback_data: `status:${requestId}:done` }
-    ]]
+    inline_keyboard: [
+      [
+        { text: "📞 Передзвонити", callback_data: `status:${requestId}:callback` },
+        { text: "✅ В роботу", callback_data: `status:${requestId}:in_progress` }
+      ],
+      [
+        { text: "🏁 Виконана", callback_data: `status:${requestId}:done` },
+        { text: "⛔ Скасована", callback_data: `status:${requestId}:cancelled` }
+      ]
+    ]
+  };
+}
+
+function confirmKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "✅ Підтвердити заявку", callback_data: CALLBACKS.CONFIRM_SUBMIT }],
+      [
+        { text: "✏️ Ім'я", callback_data: `${CALLBACKS.EDIT_PREFIX}name` },
+        { text: "✏️ Телефон", callback_data: `${CALLBACKS.EDIT_PREFIX}phone` }
+      ],
+      [
+        { text: "✏️ Email", callback_data: `${CALLBACKS.EDIT_PREFIX}email` },
+        { text: "✏️ Адреса", callback_data: `${CALLBACKS.EDIT_PREFIX}address` }
+      ],
+      [
+        { text: "✏️ Опис", callback_data: `${CALLBACKS.EDIT_PREFIX}description` },
+        { text: "✏️ Час", callback_data: `${CALLBACKS.EDIT_PREFIX}call_time` }
+      ],
+      [{ text: "❌ Скасувати", callback_data: CALLBACKS.CONFIRM_CANCEL }]
+    ]
   };
 }
 
@@ -477,6 +798,7 @@ async function sendMessage(env, chatId, text, extra = {}) {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
+    disable_web_page_preview: true,
     ...extra
   });
 }
@@ -517,6 +839,22 @@ async function saveState(env, chatId, state) {
 
 async function clearState(env, chatId) {
   await env.STATE_KV.delete(`state:${chatId}`);
+}
+
+async function checkRateLimit(env, chatId, userId) {
+  const key = `rate:${chatId}:${userId || "0"}`;
+  const raw = await env.STATE_KV.get(key);
+  const now = Date.now();
+  const bucket = raw ? JSON.parse(raw) : { count: 0, start: now };
+
+  if (now - bucket.start > 15_000) {
+    bucket.count = 0;
+    bucket.start = now;
+  }
+
+  bucket.count += 1;
+  await env.STATE_KV.put(key, JSON.stringify(bucket), { expirationTtl: 60 });
+  return bucket.count <= 12;
 }
 
 function validateName(value) {
@@ -583,17 +921,18 @@ function validateEnv(env) {
   }
 }
 
-/* ------------------------------ Google Sheets ------------------------------ */
-
 async function appendApplication(env, application) {
-  await ensureWorksheet(env);
-  const row = SHEET_HEADERS.map((header) => application[header] ?? "");
-  await sheetsAppend(env, `${getWorksheetName(env)}!A:L`, [row]);
+  const context = await ensureWorksheet(env);
+  const fullHeaders = context.headers;
+  const row = fullHeaders.map((header) => application[header] ?? "");
+  await sheetsAppend(env, `${getWorksheetName(env)}!A:${indexToColumn(fullHeaders.length - 1)}`, [row]);
 }
 
 async function getApplications(env) {
-  await ensureWorksheet(env);
-  const values = await sheetsGetValues(env, `${getWorksheetName(env)}!A:L`);
+  const context = await ensureWorksheet(env);
+  const fullHeaders = context.headers;
+  const lastColumn = indexToColumn(fullHeaders.length - 1);
+  const values = await sheetsGetValues(env, `${getWorksheetName(env)}!A:${lastColumn}`);
   if (!values.length) return [];
 
   const headers = values[0];
@@ -608,89 +947,139 @@ async function getApplications(env) {
   });
 }
 
-async function updateApplicationStatus(env, requestId, newStatus) {
-  await ensureWorksheet(env);
-  const values = await sheetsGetValues(env, `${getWorksheetName(env)}!A:L`);
-  if (values.length <= 1) return false;
+async function updateApplicationStatus(env, requestId, newStatus, adminUser) {
+  const context = await ensureWorksheet(env);
+  const headers = context.headers;
+  const lastColumn = indexToColumn(headers.length - 1);
+  const values = await sheetsGetValues(env, `${getWorksheetName(env)}!A:${lastColumn}`);
+  if (values.length <= 1) return { ok: false };
 
-  const headers = values[0];
   const requestIdIndex = headers.indexOf("request_id");
   const statusIndex = headers.indexOf("status");
+  const updatedAtIndex = headers.indexOf("updated_at");
+  const adminActionIndex = headers.indexOf("last_admin_action");
 
-  if (requestIdIndex === -1 || statusIndex === -1) return false;
+  if (requestIdIndex === -1 || statusIndex === -1) return { ok: false };
 
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
     if ((row[requestIdIndex] || "") === requestId) {
       const rowNumber = i + 1;
-      const columnLetter = indexToColumn(statusIndex);
-      await sheetsUpdateValues(
+      const updatedAt = formatDateTime(env, new Date());
+      const rowObject = {};
+      headers.forEach((header, index) => {
+        rowObject[header] = row[index] ?? "";
+      });
+      rowObject.status = newStatus;
+      rowObject.updated_at = updatedAt;
+      rowObject.last_admin_action = formatAdminLabel(adminUser);
+
+      const updates = [];
+      updates.push(sheetsUpdateValues(
         env,
-        `${getWorksheetName(env)}!${columnLetter}${rowNumber}`,
+        `${getWorksheetName(env)}!${indexToColumn(statusIndex)}${rowNumber}`,
         [[newStatus]]
-      );
-      return true;
+      ));
+      if (updatedAtIndex !== -1) {
+        updates.push(sheetsUpdateValues(
+          env,
+          `${getWorksheetName(env)}!${indexToColumn(updatedAtIndex)}${rowNumber}`,
+          [[updatedAt]]
+        ));
+      }
+      if (adminActionIndex !== -1) {
+        updates.push(sheetsUpdateValues(
+          env,
+          `${getWorksheetName(env)}!${indexToColumn(adminActionIndex)}${rowNumber}`,
+          [[formatAdminLabel(adminUser)]]
+        ));
+      }
+      await Promise.all(updates);
+      return { ok: true, row: rowObject, updatedAt };
     }
   }
 
-  return false;
+  return { ok: false };
 }
 
 async function ensureWorksheet(env) {
   const metadata = await sheetsGetMetadata(env);
   const sheetTitle = getWorksheetName(env);
-  const found = metadata.sheets?.find(
-    (sheet) => sheet.properties?.title === sheetTitle
-  );
+  let found = metadata.sheets?.find((sheet) => sheet.properties?.title === sheetTitle);
 
   if (!found) {
     await sheetsBatchUpdate(env, {
-      requests: [
-        {
-          addSheet: {
-            properties: {
-              title: sheetTitle
-            }
-          }
-        }
-      ]
+      requests: [{ addSheet: { properties: { title: sheetTitle } } }]
     });
+    const refreshed = await sheetsGetMetadata(env);
+    found = refreshed.sheets?.find((sheet) => sheet.properties?.title === sheetTitle);
   }
 
-  const values = await sheetsGetValues(env, `${sheetTitle}!A1:L1`);
-  if (!values.length || !values[0] || values[0].length === 0) {
-    await sheetsUpdateValues(env, `${sheetTitle}!A1:L1`, [SHEET_HEADERS]);
+  const totalHeaders = [...SHEET_HEADERS, ...OPTIONAL_EXTRA_HEADERS];
+  const currentHeaders = await sheetsGetValues(env, `${sheetTitle}!A1:${indexToColumn(totalHeaders.length - 1)}1`);
+  const firstRow = currentHeaders[0] || [];
+
+  if (!firstRow.length) {
+    await sheetsUpdateValues(env, `${sheetTitle}!A1:${indexToColumn(totalHeaders.length - 1)}1`, [totalHeaders]);
+    return { headers: totalHeaders, sheetId: found?.properties?.sheetId };
   }
+
+  const mergedHeaders = firstRow.slice();
+  for (const header of totalHeaders) {
+    if (!mergedHeaders.includes(header)) {
+      mergedHeaders.push(header);
+    }
+  }
+
+  if (mergedHeaders.length !== firstRow.length) {
+    await sheetsUpdateValues(
+      env,
+      `${sheetTitle}!A1:${indexToColumn(mergedHeaders.length - 1)}1`,
+      [mergedHeaders]
+    );
+  }
+
+  return { headers: mergedHeaders, sheetId: found?.properties?.sheetId };
 }
 
 function getWorksheetName(env) {
   return env.WORKSHEET_NAME || DEFAULT_WORKSHEET_NAME;
 }
 
+function getLogsWorksheetName(env) {
+  return env.LOGS_WORKSHEET_NAME || DEFAULT_LOGS_WORKSHEET_NAME;
+}
+
+async function ensureLogsWorksheet(env) {
+  const metadata = await sheetsGetMetadata(env);
+  const sheetTitle = getLogsWorksheetName(env);
+  const found = metadata.sheets?.find((sheet) => sheet.properties?.title === sheetTitle);
+
+  if (!found) {
+    await sheetsBatchUpdate(env, {
+      requests: [{ addSheet: { properties: { title: sheetTitle } } }]
+    });
+  }
+
+  const values = await sheetsGetValues(env, `${sheetTitle}!A1:E1`);
+  if (!values.length || !values[0] || values[0].length === 0) {
+    await sheetsUpdateValues(env, `${sheetTitle}!A1:E1`, [LOG_HEADERS]);
+  }
+}
+
 async function sheetsGetMetadata(env) {
-  return await googleApi(
-    env,
-    `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}`
-  );
+  return await googleApi(env, `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}`);
 }
 
 async function sheetsBatchUpdate(env, body) {
-  return await googleApi(
-    env,
-    `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}:batchUpdate`,
-    {
-      method: "POST",
-      body
-    }
-  );
+  return await googleApi(env, `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}:batchUpdate`, {
+    method: "POST",
+    body
+  });
 }
 
 async function sheetsGetValues(env, range) {
-  const data = await googleApi(
-    env,
-    `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}`
-  );
-
+  const data = await googleApi(env, `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}`);
   return data.values || [];
 }
 
@@ -700,11 +1089,7 @@ async function sheetsUpdateValues(env, range, values) {
     `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,
     {
       method: "PUT",
-      body: {
-        range,
-        majorDimension: "ROWS",
-        values
-      }
+      body: { range, majorDimension: "ROWS", values }
     }
   );
 }
@@ -715,11 +1100,7 @@ async function sheetsAppend(env, range, values) {
     `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
     {
       method: "POST",
-      body: {
-        range,
-        majorDimension: "ROWS",
-        values
-      }
+      body: { range, majorDimension: "ROWS", values }
     }
   );
 }
@@ -760,11 +1141,7 @@ async function getGoogleAccessToken(env) {
   const serviceAccount = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const now = Math.floor(Date.now() / 1000);
 
-  const jwtHeader = {
-    alg: "RS256",
-    typ: "JWT"
-  };
-
+  const jwtHeader = { alg: "RS256", typ: "JWT" };
   const jwtClaimSet = {
     iss: serviceAccount.client_email,
     scope: "https://www.googleapis.com/auth/spreadsheets",
@@ -773,10 +1150,7 @@ async function getGoogleAccessToken(env) {
     iat: now
   };
 
-  const unsignedToken = `${base64UrlEncode(JSON.stringify(jwtHeader))}.${base64UrlEncode(
-    JSON.stringify(jwtClaimSet)
-  )}`;
-
+  const unsignedToken = `${base64UrlEncode(JSON.stringify(jwtHeader))}.${base64UrlEncode(JSON.stringify(jwtClaimSet))}`;
   const signature = await signJwt(unsignedToken, serviceAccount.private_key);
   const assertion = `${unsignedToken}.${signature}`;
 
@@ -804,40 +1178,23 @@ async function getGoogleAccessToken(env) {
 
 async function signJwt(unsignedToken, pemPrivateKey) {
   const keyData = pemToArrayBuffer(pemPrivateKey);
-
   const cryptoKey = await crypto.subtle.importKey(
     "pkcs8",
     keyData,
-    {
-      name: "RSASSA-PKCS1-v1_5",
-      hash: "SHA-256"
-    },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["sign"]
   );
 
-  const signature = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    cryptoKey,
-    new TextEncoder().encode(unsignedToken)
-  );
-
+  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", cryptoKey, new TextEncoder().encode(unsignedToken));
   return arrayBufferToBase64Url(signature);
 }
 
 function pemToArrayBuffer(pem) {
-  const base64 = pem
-    .replace("-----BEGIN PRIVATE KEY-----", "")
-    .replace("-----END PRIVATE KEY-----", "")
-    .replace(/\s+/g, "");
-
+  const base64 = pem.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "").replace(/\s+/g, "");
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
-
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 }
 
@@ -849,33 +1206,25 @@ function base64UrlEncode(value) {
 function arrayBufferToBase64Url(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
+  for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 function indexToColumn(index) {
   let column = "";
   let num = index + 1;
-
   while (num > 0) {
     const remainder = (num - 1) % 26;
     column = String.fromCharCode(65 + remainder) + column;
     num = Math.floor((num - 1) / 26);
   }
-
   return column;
 }
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: {
-      "content-type": "application/json; charset=utf-8"
-    }
+    headers: { "content-type": "application/json; charset=utf-8" }
   });
 }
 
@@ -884,4 +1233,63 @@ function escapeHtml(value) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function trimText(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function compareRowsByCreatedAtDesc(a, b) {
+  return String(b.created_at || "").localeCompare(String(a.created_at || ""), "uk");
+}
+
+function formatDateTime(env, date) {
+  const timezone = env.TIMEZONE || DEFAULT_TIMEZONE;
+  return new Intl.DateTimeFormat("uk-UA", {
+    timeZone: timezone,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function formatDatePrefix(env, date) {
+  const timezone = env.TIMEZONE || DEFAULT_TIMEZONE;
+  const parts = new Intl.DateTimeFormat("uk-UA", {
+    timeZone: timezone,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  }).format(date);
+  return parts;
+}
+
+function formatAdminLabel(adminUser) {
+  if (!adminUser) return "Адміністратор";
+  if (adminUser.username) return `@${adminUser.username}`;
+  const fullName = [adminUser.first_name, adminUser.last_name].filter(Boolean).join(" ").trim();
+  return fullName || String(adminUser.id || "Адміністратор");
+}
+
+async function logError(env, scope, error, details = null) {
+  try {
+    console.error(scope, error instanceof Error ? error.message : String(error), details || "");
+    if (!env.GOOGLE_SHEET_ID || !env.GOOGLE_SERVICE_ACCOUNT_JSON) return;
+    await ensureLogsWorksheet(env);
+    const row = [
+      formatDateTime(env, new Date()),
+      "error",
+      scope,
+      error instanceof Error ? error.message : String(error),
+      details ? trimText(JSON.stringify(details), 3000) : ""
+    ];
+    await sheetsAppend(env, `${getLogsWorksheetName(env)}!A:E`, [row]);
+  } catch (nestedError) {
+    console.error("logError failed", nestedError instanceof Error ? nestedError.message : String(nestedError));
+  }
 }
