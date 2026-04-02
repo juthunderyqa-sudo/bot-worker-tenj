@@ -1,78 +1,58 @@
-# Techno Perspektyva Bot 2.0
+# Techno Perspektyva Bot 2.1
 
 Оновлений Telegram-бот для Cloudflare Workers + KV + Google Sheets.
 
-## Що вже додано
+## Що додано
 - покрокова форма заявки
 - підтвердження заявки перед записом у таблицю
-- редагування полів перед підтвердженням
+- редагування будь-якого поля перед підтвердженням
+- фото до заявки (до 5 штук)
+- геолокація кнопкою Telegram
+- anti-flood
 - антидубль заявки
-- базовий anti-flood
 - статуси: Нова / Передзвонити / В роботі / Виконана / Скасована
 - автоматичне повідомлення клієнту при зміні статусу
-- команди для адміна: /new_requests, /today, /stats
+- команди для адміна: /new_requests, /today, /stats, /find_phone
 - логування помилок у лист `BotLogs`
 - сумісність зі старими записами в існуючій таблиці
 - автоматичне розширення заголовків таблиці без видалення старих даних
 
-## Структура
-- `src/index.js` — основний код воркера
-- `wrangler.jsonc` — конфіг Cloudflare Worker
-- `dev.vars.example` — локальні змінні
-- `bot-worker-tenj-4170b24bae14.json` — service account JSON
+## Нові колонки, які бот може дозаписати праворуч
+Старі колонки не видаляються.
 
-## Поточні аркуші Google Sheets
-- основний: `Applications`
-- логи: `BotLogs`
-
-## Що зміниться в таблиці
-Існуючі колонки не ламаються.
-
-Базові колонки залишаються ті самі:
-- request_id
-- created_at
-- source
-- telegram_id
-- username
-- name
-- phone
-- email
-- address
-- description
-- call_time
-- status
-
-Додатково бот може автоматично дозаписати праворуч нові колонки:
+Додатково бот може автоматично додати:
 - updated_at
 - last_admin_action
+- location_lat
+- location_lon
+- location_label
+- photo_file_ids
+- photo_count
 
-Старі рядки залишаться на місці.
+## Команди
+- /start
+- /my_requests
+- /new_requests
+- /today
+- /stats
+- /find_phone 380XXXXXXXXX
+- /cancel
 
-## Як задеплоїти
-1. Завантаж цей проєкт у Cloudflare Worker
-2. Переконайся, що KV namespace `STATE_KV` існує
-3. У Variables/Secrets мають бути:
-   - BOT_TOKEN
-   - GOOGLE_SHEET_ID
-   - ADMIN_IDS
-   - WORKSHEET_NAME
-   - LOGS_WORKSHEET_NAME
-   - TIMEZONE
-   - SETUP_KEY
-   - TELEGRAM_WEBHOOK_SECRET
-   - GOOGLE_SERVICE_ACCOUNT_JSON
-4. Після деплою відкрий:
-   - `https://YOUR-WORKER.workers.dev/setup?key=techno-perspektyva-setup-2026`
-
-## Нові команди
-- `/start`
-- `/my_requests`
-- `/new_requests`
-- `/today`
-- `/stats`
-- `/cancel`
+## Після деплою
+1. Переконайся, що KV namespace `STATE_KV` підключений
+2. Переконайся, що service account має доступ редактора до таблиці
+3. Відкрий:
+   - `https://YOUR-WORKER.workers.dev/setup?key=...`
+4. Після цього перевір у Telegram:
+   - створення заявки
+   - надсилання геолокації
+   - надсилання фото
+   - /new_requests
+   - /today
+   - /stats
+   - /find_phone 380...
 
 ## Важливо
-- якщо деплоїш через GitHub, не публікуй секрети у відкритий репозиторій
-- service account повинен мати доступ редактора до таблиці
-- бот сам створить аркуш `BotLogs`, якщо його ще немає
+- якщо вже є старі заявки — вони залишаться
+- нові колонки будуть додані лише праворуч
+- фото зберігаються як Telegram file_id, а адмінам бот їх пересилає окремими повідомленнями
