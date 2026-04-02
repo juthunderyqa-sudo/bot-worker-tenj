@@ -53,7 +53,7 @@ const TEXT = {
   START_APPLICATION: "Починаємо оформлення заявки.\n\nВведіть, будь ласка, ваше ім'я.",
   ASK_PHONE: "Введіть номер телефону у форматі <b>380XXXXXXXXX</b>.",
   ASK_EMAIL: "Введіть email або натисніть <b>Пропустити</b>.",
-  ASK_ADDRESS: "Надішліть адресу текстом або натисніть кнопку геолокації.",
+  ASK_ADDRESS: "Надішліть адресу текстом. Геолокація — лише за бажанням, через окрему кнопку нижче.",
   ASK_DESCRIPTION: "Коротко опишіть, які роботи потрібно виконати.",
   ASK_CALL_TIME: "Вкажіть зручний час для дзвінка або натисніть <b>Пропустити</b>.",
   ASK_PHOTOS: "Надішліть 1-5 фото об'єкта/проблеми. Коли завершите — натисніть <b>Готово з фото</b> або <b>Пропустити</b>.",
@@ -61,7 +61,7 @@ const TEXT = {
   INVALID_NAME: "Ім'я має містити щонайменше 2 символи. Спробуйте ще раз.",
   INVALID_PHONE: "Номер має бути строго у форматі <b>380XXXXXXXXX</b>. Спробуйте ще раз.",
   INVALID_EMAIL: "Email виглядає некоректно. Спробуйте ще раз або натисніть <b>Пропустити</b>.",
-  INVALID_ADDRESS: "Будь ласка, вкажіть адресу текстом або надішліть геолокацію.",
+  INVALID_ADDRESS: "Будь ласка, вкажіть адресу текстом. Геолокацію можна надсилати лише за бажанням.",
   INVALID_DESCRIPTION: "Опис має містити щонайменше 5 символів.",
   TOO_LONG_DESCRIPTION: "Опис занадто довгий. Скоротіть його до 1000 символів.",
   INVALID_PHOTO_STEP: "Тут очікується фото. Надішліть фото, натисніть <b>Готово з фото</b> або <b>Пропустити</b>.",
@@ -343,6 +343,10 @@ async function processFormStep(message, state, env) {
           data.address = "Геолокація";
         }
       } else {
+        if (text === 'Продовжити без геолокації') {
+          await sendMessage(env, chatId, 'Вкажіть адресу текстом одним повідомленням.', { reply_markup: addressKeyboard() });
+          return;
+        }
         if (!validateAddress(text)) {
           await sendMessage(env, chatId, TEXT.INVALID_ADDRESS, { reply_markup: addressKeyboard() });
           return;
@@ -556,7 +560,7 @@ async function handleConfirmSubmit(callbackQuery, env) {
   await notifyAdmins(env, payload);
   await clearState(env, chatId);
 
-  await answerCallbackQuery(env, callbackQuery.id, "Заявку підтверджено.", false);
+  await answerCallbackQuery(env, callbackQuery.id, "Заявку підтверджено і збережено в Google Sheets.", false);
   await sendMessage(env, chatId, TEXT.SUCCESS, { reply_markup: afterSubmitKeyboard(isAdmin(env, callbackQuery.from?.id)) });
 }
 
@@ -923,6 +927,7 @@ function addressKeyboard() {
   return {
     keyboard: [
       [{ text: "📍 Надіслати геолокацію", request_location: true }],
+      [{ text: "Продовжити без геолокації" }],
       [{ text: "/cancel" }]
     ],
     resize_keyboard: true,
@@ -1126,7 +1131,7 @@ function validateEnv(env) {
 async function appendApplication(env, application) {
   const context = await ensureWorksheet(env);
   const row = context.headers.map((header) => application[header] ?? "");
-  await sheetsAppend(env, `${getWorksheetName(env)}!A:${indexToColumn(context.headers.length - 1)}`, [row]);
+  await withGoogleRetry(() => sheetsAppend(env, `${getWorksheetName(env)}!A:${indexToColumn(context.headers.length - 1)}`, [row]));
 }
 
 async function getApplications(env) {
@@ -1171,13 +1176,13 @@ async function updateApplicationStatus(env, requestId, newStatus, adminUser) {
     rowObject.last_admin_action = formatAdminLabel(adminUser);
 
     const updates = [
-      sheetsUpdateValues(env, `${getWorksheetName(env)}!${indexToColumn(statusIndex)}${rowNumber}`, [[newStatus]])
+      withGoogleRetry(() => sheetsUpdateValues(env, `${getWorksheetName(env)}!${indexToColumn(statusIndex)}${rowNumber}`, [[newStatus]]))
     ];
     if (updatedAtIndex !== -1) {
-      updates.push(sheetsUpdateValues(env, `${getWorksheetName(env)}!${indexToColumn(updatedAtIndex)}${rowNumber}`, [[updatedAt]]));
+      updates.push(withGoogleRetry(() => sheetsUpdateValues(env, `${getWorksheetName(env)}!${indexToColumn(updatedAtIndex)}${rowNumber}`, [[updatedAt]])));
     }
     if (adminActionIndex !== -1) {
-      updates.push(sheetsUpdateValues(env, `${getWorksheetName(env)}!${indexToColumn(adminActionIndex)}${rowNumber}`, [[formatAdminLabel(adminUser)]]));
+      updates.push(withGoogleRetry(() => sheetsUpdateValues(env, `${getWorksheetName(env)}!${indexToColumn(adminActionIndex)}${rowNumber}`, [[formatAdminLabel(adminUser)]])));
     }
     await Promise.all(updates);
     return { ok: true, row: rowObject, updatedAt };
@@ -1272,6 +1277,21 @@ async function sheetsAppend(env, range, values) {
     `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
     { method: "POST", body: { range, majorDimension: "ROWS", values } }
   );
+}
+
+
+async function withGoogleRetry(fn, retries = 2) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === retries) break;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+  throw lastError;
 }
 
 async function googleApi(env, url, options = {}) {
